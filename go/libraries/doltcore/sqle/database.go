@@ -2674,9 +2674,10 @@ func (db Database) DropView(ctx *sql.Context, name string) error {
 
 // GetTriggers implements sql.TriggerDatabase.
 func (db Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error) {
+	// A failure is returned, never taken for no triggers: a write would then run without them.
 	root, err := db.GetRoot(ctx)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 
 	// Triggers are rows of dolt_schemas, so they are cached under that table's hash, which every other write leaves
@@ -2693,18 +2694,24 @@ func (db Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error
 	ds := dsess.DSessFromSess(ctx.Session)
 	dbState, _, err := ds.LookupDbState(ctx, db.RevisionQualifiedName())
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 
-	var triggers []sql.TriggerDefinition
-	if triggers, ok = dbState.SessionCache().GetCachedTriggers(key, db.schemaName); ok {
+	if triggers, ok := dbState.SessionCache().GetCachedTriggers(key, db.schemaName); ok {
 		return triggers, nil
 	}
+	// Only a list that loaded is cached: a failed load (a cancelled statement, a read error) is retried by the next
+	// statement, not remembered as no triggers until dolt_schemas changes.
+	triggers, err := db.loadTriggers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	dbState.SessionCache().CacheTriggers(key, triggers, db.schemaName)
+	return triggers, nil
+}
 
-	defer func() {
-		dbState.SessionCache().CacheTriggers(key, triggers, db.schemaName)
-	}()
-
+// loadTriggers reads the triggers of this database's dolt_schemas table.
+func (db Database) loadTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error) {
 	tbl, _, err := db.GetTableInsensitive(ctx, doltdb.SchemasTableName)
 	if err != nil {
 		return nil, err
@@ -2724,6 +2731,7 @@ func (db Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error
 		return nil, err
 	}
 
+	var triggers []sql.TriggerDefinition
 	for _, frag := range frags {
 		triggers = append(triggers, sql.TriggerDefinition{
 			Name:            frag.name,
