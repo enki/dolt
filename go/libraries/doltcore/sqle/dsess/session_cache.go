@@ -45,8 +45,8 @@ type SessionCache struct {
 	// tableMaps is keyed by a digest of the table list of table names
 	tableMaps map[uint64]map[string]string
 
-	// TODO: cache views/triggers by schema fragment hash
-	views    map[doltdb.DataCacheKey]map[TableCacheKey]sql.ViewDefinition
+	// views and triggers are keyed by the hash of the schema's dolt_schemas table; views by lower-case name
+	views    map[TableSchemaKey]map[string]sql.ViewDefinition
 	triggers map[TableSchemaKey][]sql.TriggerDefinition
 
 	// writers are keyed by table schema hash
@@ -298,13 +298,13 @@ func (c *SessionCache) CacheTableNameMap(key uint64, tables map[string]string) {
 	c.tableMaps[key] = tables
 }
 
-// CacheViews caches all views in a database for the cache key given
+// CacheViews caches all views of a schema for the cache key given
 func (c *SessionCache) CacheViews(key doltdb.DataCacheKey, views []sql.ViewDefinition, schema string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.views == nil {
-		c.views = make(map[doltdb.DataCacheKey]map[TableCacheKey]sql.ViewDefinition)
+		c.views = make(map[TableSchemaKey]map[string]sql.ViewDefinition)
 	}
 	if len(c.views) > maxCachedKeys {
 		for k := range c.views {
@@ -312,31 +312,24 @@ func (c *SessionCache) CacheViews(key doltdb.DataCacheKey, views []sql.ViewDefin
 		}
 	}
 
-	viewsForKey, ok := c.views[key]
+	schKey := TableSchemaKey{key: key, schema: strings.ToLower(schema)}
+	viewsForKey, ok := c.views[schKey]
 	if !ok {
-		viewsForKey = make(map[TableCacheKey]sql.ViewDefinition)
-		c.views[key] = viewsForKey
+		viewsForKey = make(map[string]sql.ViewDefinition)
+		c.views[schKey] = viewsForKey
 	}
 
 	for i := range views {
-		viewName := TableCacheKey{
-			Name:   strings.ToLower(views[i].Name),
-			Schema: strings.ToLower(schema),
-		}
-		viewsForKey[viewName] = views[i]
+		viewsForKey[strings.ToLower(views[i].Name)] = views[i]
 	}
 }
 
-// ViewsCached returns whether this cache has been initialized with the set of views yet
-func (c *SessionCache) ViewsCached(key doltdb.DataCacheKey) bool {
+// ViewsCached returns whether this cache holds the views of the schema for the cache key given
+func (c *SessionCache) ViewsCached(key doltdb.DataCacheKey, schema string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.views == nil {
-		return false
-	}
-
-	_, ok := c.views[key]
+	_, ok := c.views[TableSchemaKey{key: key, schema: strings.ToLower(schema)}]
 	return ok
 }
 
@@ -345,17 +338,13 @@ func (c *SessionCache) GetCachedViewDefinition(key doltdb.DataCacheKey, viewName
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.views == nil {
-		return sql.ViewDefinition{}, false
-	}
-
-	viewsForKey, ok := c.views[key]
+	viewsForKey, ok := c.views[TableSchemaKey{key: key, schema: strings.ToLower(viewName.Schema)}]
 	if !ok {
 		return sql.ViewDefinition{}, false
 	}
 
-	table, ok := viewsForKey[viewName.ToLower()]
-	return table, ok
+	view, ok := viewsForKey[strings.ToLower(viewName.Name)]
+	return view, ok
 }
 
 type TableSchemaKey struct {
@@ -363,7 +352,7 @@ type TableSchemaKey struct {
 	key    doltdb.DataCacheKey
 }
 
-// CacheTriggers caches all views in a database for the cache key given
+// CacheTriggers caches all triggers of a schema for the cache key given
 func (c *SessionCache) CacheTriggers(key doltdb.DataCacheKey, triggers []sql.TriggerDefinition, schema string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -377,14 +366,8 @@ func (c *SessionCache) CacheTriggers(key doltdb.DataCacheKey, triggers []sql.Tri
 		}
 	}
 
-	schKey := TableSchemaKey{key: key, schema: schema}
-	_, ok := c.triggers[schKey]
-	if !ok {
-		// create backing array to differentiate no triggers/no cache
-		c.triggers[schKey] = make([]sql.TriggerDefinition, 0)
-	}
-
-	c.triggers[schKey] = append(c.triggers[schKey], triggers...)
+	// a non-nil slice differentiates no triggers from no cache; caching a key again replaces its triggers
+	c.triggers[TableSchemaKey{key: key, schema: schema}] = append(make([]sql.TriggerDefinition, 0, len(triggers)), triggers...)
 }
 
 // GetCachedTriggers returns the cached view named, and whether the cache was present

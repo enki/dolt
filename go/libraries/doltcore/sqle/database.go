@@ -2565,11 +2565,11 @@ func (db Database) GetViewDefinition(ctx *sql.Context, viewName string) (sql.Vie
 		return sql.ViewDefinition{}, false, err
 	}
 
-	if dbState.SessionCache().ViewsCached(key) {
+	// The cache holds every view of this dolt_schemas table, so a name it lacks is not a view. Tables are resolved
+	// through here first, so a miss is the common case.
+	if dbState.SessionCache().ViewsCached(key, db.schemaName) {
 		view, ok := dbState.SessionCache().GetCachedViewDefinition(key, dsess.TableCacheKey{Name: viewName, Schema: db.schemaName})
-		if ok {
-			return view, ok, nil
-		}
+		return view, ok, nil
 	}
 
 	tbl, _, err := db.GetTableInsensitive(ctx, doltdb.SchemasTableName)
@@ -2679,10 +2679,16 @@ func (db Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error
 		return nil, nil
 	}
 
-	key, err := doltdb.NewDataCacheKey(root)
+	// Triggers are rows of dolt_schemas, so they are cached under that table's hash, which every other write leaves
+	// unchanged. A root without the table has no triggers.
+	schTblHash, ok, err := root.GetTableHash(ctx, doltdb.TableName{Name: doltdb.SchemasTableName, Schema: db.schemaName})
 	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		return nil, nil
+	}
+	key := doltdb.DataCacheKey{Hash: schTblHash}
 
 	ds := dsess.DSessFromSess(ctx.Session)
 	dbState, _, err := ds.LookupDbState(ctx, db.RevisionQualifiedName())
@@ -2691,7 +2697,6 @@ func (db Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error
 	}
 
 	var triggers []sql.TriggerDefinition
-	var ok bool
 	if triggers, ok = dbState.SessionCache().GetCachedTriggers(key, db.schemaName); ok {
 		return triggers, nil
 	}

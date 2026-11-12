@@ -987,6 +987,103 @@ var DoltTransactionTests = []queries.TransactionTest{
 			},
 		},
 	},
+	{
+		// A session caches triggers and views under the hash of dolt_schemas, and remembers that a name is not a view.
+		// Other writes leave that hash alone; a change to a trigger or a view, by this client or another, moves it.
+		Name: "triggers and views created or dropped by any client apply to the next statement",
+		SetUpScript: []string{
+			"create table t (x int primary key)",
+			"create table log (n int primary key auto_increment, msg varchar(10))",
+			"create trigger t_ai after insert on t for each row insert into log (msg) values ('one')",
+		},
+		Assertions: []queries.ScriptTestAssertion{
+			{
+				Query:    "/* client a */ insert into t values (1)",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query:       "/* client a */ select * from v",
+				ExpectedErr: sql.ErrTableNotFound,
+			},
+			{
+				Query:    "/* client a */ select count(*) from log",
+				Expected: []sql.Row{{1}},
+			},
+			{
+				Query:    "/* client b */ drop trigger t_ai",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:    "/* client b */ create trigger t_ai after insert on t for each row insert into log (msg) values ('two')",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:    "/* client b */ create view v as select 7 as x",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:    "/* client a */ insert into t values (2)",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query:    "/* client a */ select * from v",
+				Expected: []sql.Row{{7}},
+			},
+			{
+				Query:       "/* client a */ select * from w",
+				ExpectedErr: sql.ErrTableNotFound,
+			},
+			{
+				Query:    "/* client a */ create view w as select 8 as x",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:    "/* client a */ select * from w",
+				Expected: []sql.Row{{8}},
+			},
+			{
+				Query:    "/* client a */ start transaction",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "/* client a */ insert into t values (3)",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query:    "/* client b */ drop trigger t_ai",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				// a's transaction reads the state it started from
+				Query:    "/* client a */ insert into t values (4)",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query:    "/* client a */ commit",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "/* client a */ insert into t values (5)",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query:    "/* client a */ create trigger t_ai after insert on t for each row insert into log (msg) values ('three')",
+				Expected: []sql.Row{{types.NewOkResult(0)}},
+			},
+			{
+				Query:    "/* client a */ insert into t values (6)",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query:    "/* client b */ insert into t values (7)",
+				Expected: []sql.Row{{types.NewOkResult(1)}},
+			},
+			{
+				Query:    "/* client b */ select msg from log order by n",
+				Expected: []sql.Row{{"one"}, {"two"}, {"two"}, {"two"}, {"three"}, {"three"}},
+			},
+		},
+	},
 }
 
 var DoltConflictHandlingTests = []queries.TransactionTest{
